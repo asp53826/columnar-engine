@@ -184,6 +184,67 @@ void test_randomized_join_differential() {
   }
 }
 
+void test_tpch_q1_known_answer() {
+  columnar::LineItemTable table{
+      columnar::Column<double>({10, 20, 30}),
+      columnar::Column<double>({100, 200, 300}),
+      columnar::Column<double>({0.10, 0.20, 0.30}),
+      columnar::Column<double>({0.05, 0.10, 0.15}),
+      columnar::Column<std::int64_t>({0, 0, 1}),
+      columnar::Column<std::int64_t>({1, 1, 0}),
+      columnar::Column<std::int64_t>({10, 20, 30})};
+  const auto result = columnar::tpch_q1(table, 20, 2);
+  CHECK(result.size() == 1);
+  const auto& aggregate = result.at({0, 1});
+  CHECK(aggregate.count == 2);
+  CHECK(std::abs(aggregate.sum_quantity - 30.0) < 1e-12);
+  CHECK(std::abs(aggregate.sum_base_price - 300.0) < 1e-12);
+  CHECK(std::abs(aggregate.sum_discounted_price - 250.0) < 1e-12);
+  CHECK(std::abs(aggregate.sum_charge - 270.5) < 1e-12);
+  CHECK(std::abs(aggregate.average_discount() - 0.15) < 1e-12);
+  CHECK(result == columnar::scalar_tpch_q1(table, 20));
+}
+
+void test_randomized_tpch_q1_differential() {
+  std::mt19937_64 random(8675309);
+  for (int trial = 0; trial < 100; ++trial) {
+    const std::size_t size = random() % 1000;
+    std::vector<double> quantity(size);
+    std::vector<double> price(size);
+    std::vector<double> discount(size);
+    std::vector<double> tax(size);
+    std::vector<std::int64_t> flag(size);
+    std::vector<std::int64_t> status(size);
+    std::vector<std::int64_t> ship_date(size);
+    columnar::ValidityBitmap discount_validity(size, true);
+    for (std::size_t row = 0; row < size; ++row) {
+      quantity[row] = 1.0 + random() % 50;
+      price[row] = static_cast<double>(random() % 100000) / 100.0;
+      discount[row] = static_cast<double>(random() % 11) / 100.0;
+      tax[row] = static_cast<double>(random() % 9) / 100.0;
+      flag[row] = random() % 3;
+      status[row] = random() % 2;
+      ship_date[row] = random() % 2500;
+      if (random() % 101 == 0) {
+        discount_validity.set(row, false);
+      }
+    }
+    const columnar::LineItemTable table{
+        columnar::Column<double>(std::move(quantity)),
+        columnar::Column<double>(std::move(price)),
+        columnar::Column<double>(std::move(discount), discount_validity),
+        columnar::Column<double>(std::move(tax)),
+        columnar::Column<std::int64_t>(std::move(flag)),
+        columnar::Column<std::int64_t>(std::move(status)),
+        columnar::Column<std::int64_t>(std::move(ship_date))};
+    const std::int64_t cutoff = random() % 2500;
+    const auto expected = columnar::scalar_tpch_q1(table, cutoff);
+    for (const std::size_t batch : {1U, 7U, 64U, 1024U}) {
+      CHECK(columnar::tpch_q1(table, cutoff, batch) == expected);
+    }
+  }
+}
+
 void test_invalid_selection_is_rejected() {
   columnar::Column<double> values({1.0, 2.0});
   const columnar::Selection invalid = {0, 7};
@@ -208,6 +269,8 @@ int main() {
   test_hash_join_duplicate_and_null_semantics();
   test_randomized_filter_and_aggregate_differential();
   test_randomized_join_differential();
+  test_tpch_q1_known_answer();
+  test_randomized_tpch_q1_differential();
   test_invalid_selection_is_rejected();
   if (failures != 0) {
     std::cerr << failures << " of " << assertions << " assertions failed\n";

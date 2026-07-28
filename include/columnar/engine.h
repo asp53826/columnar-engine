@@ -108,4 +108,39 @@ JoinPairs hash_join(const Column<std::int64_t>& left,
 JoinPairs nested_loop_join(const Column<std::int64_t>& left,
                            const Column<std::int64_t>& right);
 
+struct LineItemTable {
+  Column<double> quantity;
+  Column<double> extended_price;
+  Column<double> discount;
+  Column<double> tax;
+  Column<std::int64_t> return_flag;
+  Column<std::int64_t> line_status;
+  Column<std::int64_t> ship_date;
+
+  std::size_t rows() const;
+};
+
+struct Q1Aggregate {
+  double sum_quantity = 0.0;
+  double sum_base_price = 0.0;
+  double sum_discounted_price = 0.0;
+  double sum_charge = 0.0;
+  double sum_discount = 0.0;
+  std::uint64_t count = 0;
+
+  double average_quantity() const;
+  double average_price() const;
+  double average_discount() const;
+  bool operator==(const Q1Aggregate& other) const;
+};
+
+using Q1Key = std::pair<std::int64_t, std::int64_t>;
+using Q1Result = std::map<Q1Key, Q1Aggregate>;
+
+Q1Result tpch_q1(const LineItemTable& lineitem,
+                 std::int64_t maximum_ship_date,
+                 std::size_t batch_size = 1024);
+Q1Result scalar_tpch_q1(const LineItemTable& lineitem,
+                        std::int64_t maximum_ship_date);
+
 }  // namespace columnar

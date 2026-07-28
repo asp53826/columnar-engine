@@ -269,4 +269,106 @@ JoinPairs nested_loop_join(const Column<std::int64_t>& left,
   return pairs;
 }
 
+std::size_t LineItemTable::rows() const {
+  const std::size_t count = quantity.size();
+  if (extended_price.size() != count || discount.size() != count ||
+      tax.size() != count || return_flag.size() != count ||
+      line_status.size() != count || ship_date.size() != count) {
+    throw std::invalid_argument("lineitem columns have unequal lengths");
+  }
+  return count;
+}
+
+double Q1Aggregate::average_quantity() const {
+  return count == 0 ? 0.0 : sum_quantity / static_cast<double>(count);
+}
+
+double Q1Aggregate::average_price() const {
+  return count == 0 ? 0.0 : sum_base_price / static_cast<double>(count);
+}
+
+double Q1Aggregate::average_discount() const {
+  return count == 0 ? 0.0 : sum_discount / static_cast<double>(count);
+}
+
+bool Q1Aggregate::operator==(const Q1Aggregate& other) const {
+  const auto close = [](double left, double right) {
+    return std::abs(left - right) <=
+           1e-10 * std::max({1.0, std::abs(left), std::abs(right)});
+  };
+  return count == other.count && close(sum_quantity, other.sum_quantity) &&
+         close(sum_base_price, other.sum_base_price) &&
+         close(sum_discounted_price, other.sum_discounted_price) &&
+         close(sum_charge, other.sum_charge) &&
+         close(sum_discount, other.sum_discount);
+}
+
+namespace {
+
+bool q1_row_valid(const LineItemTable& table, std::size_t row) {
+  return table.quantity.valid(row) && table.extended_price.valid(row) &&
+         table.discount.valid(row) && table.tax.valid(row) &&
+         table.return_flag.valid(row) && table.line_status.valid(row) &&
+         table.ship_date.valid(row);
+}
+
+void q1_update(Q1Aggregate& aggregate, const LineItemTable& table,
+               std::size_t row) {
+  const double price = table.extended_price.value(row);
+  const double discount = table.discount.value(row);
+  const double discounted = price * (1.0 - discount);
+  aggregate.sum_quantity += table.quantity.value(row);
+  aggregate.sum_base_price += price;
+  aggregate.sum_discounted_price += discounted;
+  aggregate.sum_charge += discounted * (1.0 + table.tax.value(row));
+  aggregate.sum_discount += discount;
+  ++aggregate.count;
+}
+
+}  // namespace
+
+Q1Result tpch_q1(const LineItemTable& table,
+                 std::int64_t maximum_ship_date, std::size_t batch_size) {
+  const std::size_t rows = table.rows();
+  if (batch_size == 0) {
+    throw std::invalid_argument("batch size must be positive");
+  }
+  Q1Result result;
+  std::vector<std::uint8_t> mask(batch_size);
+  for (std::size_t base = 0; base < rows; base += batch_size) {
+    const std::size_t count = std::min(batch_size, rows - base);
+    for (std::size_t lane = 0; lane < count; ++lane) {
+      const std::size_t row = base + lane;
+      mask[lane] = static_cast<std::uint8_t>(
+          q1_row_valid(table, row) &&
+          table.ship_date.value(row) <= maximum_ship_date);
+    }
+    for (std::size_t lane = 0; lane < count; ++lane) {
+      if (mask[lane] == 0) {
+        continue;
+      }
+      const std::size_t row = base + lane;
+      const Q1Key key{table.return_flag.value(row),
+                      table.line_status.value(row)};
+      q1_update(result[key], table, row);
+    }
+  }
+  return result;
+}
+
+Q1Result scalar_tpch_q1(const LineItemTable& table,
+                        std::int64_t maximum_ship_date) {
+  Q1Result result;
+  for (std::size_t row = 0; row < table.rows(); ++row) {
+    if (!q1_row_valid(table, row) ||
+        table.ship_date.value(row) > maximum_ship_date) {
+      continue;
+    }
+    const Q1Key key{table.return_flag.value(row),
+                    table.line_status.value(row)};
+    q1_update(result[key], table, row);
+  }
+  return result;
+}
+
 }  // namespace columnar

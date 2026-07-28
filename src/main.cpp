@@ -1,5 +1,6 @@
 #include "columnar/engine.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <iomanip>
@@ -35,19 +36,44 @@ Dataset generate(std::size_t rows) {
           columnar::Column<double>(std::move(revenue), revenue_validity)};
 }
 
+columnar::LineItemTable generate_lineitem(std::size_t rows) {
+  std::mt19937_64 random(42);
+  std::vector<double> quantity(rows), price(rows), discount(rows), tax(rows);
+  std::vector<std::int64_t> flag(rows), status(rows), ship_date(rows);
+  for (std::size_t row = 0; row < rows; ++row) {
+    quantity[row] = 1 + random() % 50;
+    price[row] = static_cast<double>(random() % 100000) / 100.0;
+    discount[row] = static_cast<double>(random() % 11) / 100.0;
+    tax[row] = static_cast<double>(random() % 9) / 100.0;
+    flag[row] = random() % 3;
+    status[row] = random() % 2;
+    ship_date[row] = random() % 2500;
+  }
+  return {columnar::Column<double>(std::move(quantity)),
+          columnar::Column<double>(std::move(price)),
+          columnar::Column<double>(std::move(discount)),
+          columnar::Column<double>(std::move(tax)),
+          columnar::Column<std::int64_t>(std::move(flag)),
+          columnar::Column<std::int64_t>(std::move(status)),
+          columnar::Column<std::int64_t>(std::move(ship_date))};
+}
+
 template <typename Function>
 double measure(Function function, int repetitions, std::uint64_t& checksum) {
-  const auto started = std::chrono::steady_clock::now();
+  std::vector<double> samples;
+  samples.reserve(repetitions);
   for (int repetition = 0; repetition < repetitions; ++repetition) {
+    const auto started = std::chrono::steady_clock::now();
     const auto groups = function();
+    samples.push_back(std::chrono::duration<double, std::micro>(
+                          std::chrono::steady_clock::now() - started)
+                          .count());
     for (const auto& [key, group] : groups) {
       checksum += static_cast<std::uint64_t>(key + 1) * group.count;
     }
   }
-  return std::chrono::duration<double, std::micro>(
-             std::chrono::steady_clock::now() - started)
-             .count() /
-         repetitions;
+  std::sort(samples.begin(), samples.end());
+  return samples[samples.size() / 2];
 }
 
 int benchmark() {
@@ -93,6 +119,37 @@ int benchmark() {
                 << scalar_us / vector_us << "\n";
     }
   }
+  const auto lineitem = generate_lineitem(1000000);
+  const auto q1_scalar = [&] {
+    return columnar::scalar_tpch_q1(lineitem, 2250);
+  };
+  const auto q1_vector = [&] {
+    return columnar::tpch_q1(lineitem, 2250, 1024);
+  };
+  if (q1_scalar() != q1_vector()) {
+    throw std::runtime_error("TPC-H Q1 executors disagree");
+  }
+  const auto q1_measure = [&](const auto& function) {
+    std::vector<double> samples;
+    for (int repetition = 0; repetition < 5; ++repetition) {
+      const auto started = std::chrono::steady_clock::now();
+      const auto result = function();
+      samples.push_back(std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() - started)
+                            .count());
+      for (const auto& [key, aggregate] : result) {
+        checksum += static_cast<std::uint64_t>(key.first + key.second + 1) *
+                    aggregate.count;
+      }
+    }
+    std::sort(samples.begin(), samples.end());
+    return samples[samples.size() / 2];
+  };
+  const double q1_scalar_ms = q1_measure(q1_scalar);
+  const double q1_vector_ms = q1_measure(q1_vector);
+  std::cout << "tpch_q1_rows=1000000 scalar_ms=" << q1_scalar_ms
+            << " vector_ms=" << q1_vector_ms
+            << " speedup=" << q1_scalar_ms / q1_vector_ms << "\n";
   std::cerr << "checksum=" << checksum << "\n";
   return 0;
 }
